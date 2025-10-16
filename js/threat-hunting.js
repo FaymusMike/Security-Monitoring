@@ -8,7 +8,7 @@ class ThreatHunting {
             },
             census: {
                 base: 'https://api.censys.io/api/v1',
-                key: 'YOUR_CENSUS_API_KEY' // Replace with actual key
+                key: 'censys_iDMcXBED_Mw84T9Ufyvh3b28TpZdqX438' // Replace with actual key
             }
         };
         this.customQueries = this.loadCustomQueries();
