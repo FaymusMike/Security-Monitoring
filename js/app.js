@@ -15,20 +15,25 @@ class SecurityMonitoringApp {
     }
 
     initializeNavigation() {
-        // Handle navigation clicks
+        // Handle navigation clicks - FIXED VERSION
         document.querySelectorAll('.nav-link').forEach(link => {
             link.addEventListener('click', (e) => {
                 e.preventDefault();
-                const target = e.target.getAttribute('href').substring(1);
-                this.showSection(target);
+                const target = link.getAttribute('href'); // Use link, not e.target
+                if (target && target.startsWith('#')) {
+                    this.showSection(target.substring(1));
+                }
             });
         });
 
         // Quick actions
         document.querySelectorAll('.quick-action').forEach(button => {
             button.addEventListener('click', (e) => {
-                const action = e.target.closest('.quick-action').dataset.action;
-                this.handleQuickAction(action);
+                const actionElement = e.target.closest('.quick-action');
+                if (actionElement) {
+                    const action = actionElement.dataset.action;
+                    this.handleQuickAction(action);
+                }
             });
         });
     }
@@ -48,7 +53,8 @@ class SecurityMonitoringApp {
         // Update navigation
         document.querySelectorAll('.nav-link').forEach(link => {
             link.classList.remove('active');
-            if (link.getAttribute('href') === `#${sectionId}`) {
+            const href = link.getAttribute('href');
+            if (href === `#${sectionId}`) {
                 link.classList.add('active');
             }
         });
@@ -106,13 +112,31 @@ class SecurityMonitoringApp {
     loadScanHistory() {
         // Load scan history from Firebase or localStorage
         try {
+            if (window.firebaseManager) {
+                firebaseManager.getScanHistory(100).then(history => {
+                    this.scanHistory = history;
+                    this.updateRecentActivityTable();
+                }).catch(error => {
+                    console.error('Error loading from Firebase:', error);
+                    this.loadFromLocalStorage();
+                });
+            } else {
+                this.loadFromLocalStorage();
+            }
+        } catch (error) {
+            console.error('Error loading scan history:', error);
+            this.loadFromLocalStorage();
+        }
+    }
+
+    loadFromLocalStorage() {
+        try {
             const history = JSON.parse(localStorage.getItem('scanHistory')) || [];
             this.scanHistory = history;
             this.updateRecentActivityTable();
         } catch (error) {
-            console.error('Error loading scan history:', error);
+            console.error('Error loading from localStorage:', error);
             this.scanHistory = [];
-            localStorage.setItem('scanHistory', JSON.stringify([]));
         }
     }
 
@@ -162,7 +186,7 @@ class SecurityMonitoringApp {
             'high': 'threat-level-high',
             'critical': 'threat-level-critical'
         };
-        return classes[severity.toLowerCase()] || 'threat-level-low';
+        return classes[severity?.toLowerCase()] || 'threat-level-low';
     }
 
     addScanActivity(activity) {
@@ -178,6 +202,21 @@ class SecurityMonitoringApp {
         activity.result = activity.result || 'Unknown';
         activity.severity = activity.severity || 'low';
 
+        // Save to Firebase if available, otherwise localStorage
+        if (window.firebaseManager) {
+            firebaseManager.saveScanResult(activity).then(scanId => {
+                console.log('Scan saved with ID:', scanId);
+                this.loadScanHistory(); // Reload to get updated data
+            }).catch(error => {
+                console.error('Error saving scan:', error);
+                this.saveToLocalStorage(activity);
+            });
+        } else {
+            this.saveToLocalStorage(activity);
+        }
+    }
+
+    saveToLocalStorage(activity) {
         this.scanHistory.push(activity);
         
         // Keep only last 100 entries
@@ -238,7 +277,7 @@ class SecurityMonitoringApp {
                 data: {
                     labels: ['Malicious', 'Suspicious', 'Clean', 'Unknown'],
                     datasets: [{
-                        data: [0, 0, 0, 0], // Start with zeros
+                        data: [0, 0, 0, 0],
                         backgroundColor: [
                             '#e74c3c',
                             '#f39c12',
@@ -259,22 +298,7 @@ class SecurityMonitoringApp {
                                 padding: 20,
                                 usePointStyle: true
                             }
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    const label = context.label || '';
-                                    const value = context.parsed;
-                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                                    const percentage = total > 0 ? Math.round((value / total) * 100) : 0;
-                                    return `${label}: ${value} (${percentage}%)`;
-                                }
-                            }
                         }
-                    },
-                    animation: {
-                        animateScale: true,
-                        animateRotate: true
                     }
                 }
             });
@@ -323,9 +347,6 @@ class SecurityMonitoringApp {
                             beginAtZero: true,
                             ticks: {
                                 stepSize: 1
-                            },
-                            grid: {
-                                color: 'rgba(0, 0, 0, 0.1)'
                             }
                         },
                         x: {
@@ -350,7 +371,6 @@ class SecurityMonitoringApp {
 
     updateCharts() {
         if (this.threatChart) {
-            // Calculate threat distribution from scan history
             const threats = this.scanHistory.filter(a => a.severity === 'high' || a.severity === 'critical').length;
             const suspicious = this.scanHistory.filter(a => a.severity === 'medium').length;
             const clean = this.scanHistory.filter(a => a.severity === 'low').length;
@@ -361,7 +381,6 @@ class SecurityMonitoringApp {
         }
 
         if (this.scanChart) {
-            // Calculate scans per day for last 7 days
             const dailyScans = Array(7).fill(0);
             const today = new Date();
             
@@ -389,49 +408,14 @@ class SecurityMonitoringApp {
         // Online/offline detection
         window.addEventListener('online', () => {
             this.showNotification('Connection restored', 'success');
+            if (window.firebaseManager) {
+                firebaseManager.syncLocalDataToFirebase();
+            }
         });
 
         window.addEventListener('offline', () => {
             this.showNotification('Connection lost. Some features may not work.', 'warning');
         });
-
-        // Handle page visibility changes
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) {
-                this.updateDashboardStats();
-            }
-        });
-
-        // Handle beforeunload to save data
-        window.addEventListener('beforeunload', () => {
-            this.saveAppState();
-        });
-    }
-
-    saveAppState() {
-        try {
-            const appState = {
-                currentSection: this.currentSection,
-                lastUpdated: new Date().toISOString()
-            };
-            localStorage.setItem('securityAppState', JSON.stringify(appState));
-        } catch (error) {
-            console.error('Error saving app state:', error);
-        }
-    }
-
-    loadAppState() {
-        try {
-            const savedState = localStorage.getItem('securityAppState');
-            if (savedState) {
-                const state = JSON.parse(savedState);
-                if (state.currentSection) {
-                    this.showSection(state.currentSection);
-                }
-            }
-        } catch (error) {
-            console.error('Error loading app state:', error);
-        }
     }
 
     showNotification(message, type = 'info') {
@@ -512,18 +496,6 @@ class SecurityMonitoringApp {
             .replace(/"/g, "&quot;")
             .replace(/'/g, "&#039;");
     }
-
-    // Utility method to clear all data
-    clearAllData() {
-        if (confirm('Are you sure you want to clear all scan history and data? This action cannot be undone.')) {
-            this.scanHistory = [];
-            localStorage.setItem('scanHistory', JSON.stringify([]));
-            this.updateRecentActivityTable();
-            this.updateDashboardStats();
-            this.updateCharts();
-            this.showNotification('All data cleared successfully', 'success');
-        }
-    }
 }
 
 // Utility functions
@@ -565,23 +537,8 @@ class SecurityUtils {
         }
     }
 
-    static sanitizeInput(input) {
-        if (input === null || input === undefined) return '';
-        const div = document.createElement('div');
-        div.textContent = input.toString();
-        return div.innerHTML;
-    }
-
     static generateReportId() {
         return 'RPT-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9).toUpperCase();
-    }
-
-    static formatFileSize(bytes) {
-        if (bytes === 0) return '0 Bytes';
-        const k = 1024;
-        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 }
 
@@ -592,25 +549,13 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('Security Monitoring App initialized successfully');
     } catch (error) {
         console.error('Failed to initialize Security Monitoring App:', error);
-        // Show error message to user
-        const errorDiv = document.createElement('div');
-        errorDiv.className = 'alert alert-danger m-3';
-        errorDiv.innerHTML = `
-            <h4><i class="fas fa-exclamation-triangle me-2"></i>Application Error</h4>
-            <p>Failed to initialize the Security Monitoring Tool. Please refresh the page.</p>
-            <button class="btn btn-sm btn-outline-danger" onclick="window.location.reload()">
-                <i class="fas fa-redo me-1"></i>Reload Page
-            </button>
-        `;
-        document.body.prepend(errorDiv);
     }
 });
 
-// Global functions for HTML onclick events
+// Global functions
 function generateThreatReport() {
     if (window.securityApp) {
-        securityApp.showNotification('Generating comprehensive threat report...', 'info');
-        // Simulate report generation
+        securityApp.showNotification('Generating threat report...', 'info');
         setTimeout(() => {
             securityApp.showNotification('Threat report generated successfully!', 'success');
         }, 2000);
@@ -620,7 +565,6 @@ function generateThreatReport() {
 function generateHuntingReport() {
     if (window.securityApp) {
         securityApp.showNotification('Compiling threat hunting findings...', 'info');
-        // Simulate report generation
         setTimeout(() => {
             securityApp.showNotification('Hunting report compiled successfully!', 'success');
         }, 2000);
@@ -631,7 +575,6 @@ function exportData() {
     if (window.securityApp) {
         securityApp.showNotification('Preparing data for export...', 'info');
         
-        // Create export data
         const exportData = {
             exportDate: new Date().toISOString(),
             scanHistory: securityApp.scanHistory,
@@ -643,7 +586,6 @@ function exportData() {
             }
         };
         
-        // Create and trigger download
         const dataStr = JSON.stringify(exportData, null, 2);
         const dataBlob = new Blob([dataStr], { type: 'application/json' });
         const url = URL.createObjectURL(dataBlob);
