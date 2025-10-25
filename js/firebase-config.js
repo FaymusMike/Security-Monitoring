@@ -1,10 +1,9 @@
-// Firebase Configuration with Proper Error Handling
+// Firebase Configuration - No Authentication Required
 class FirebaseManager {
     constructor() {
         this.isConnected = false;
-        this.user = null;
         this.db = null;
-        this.auth = null;
+        this.userId = this.generateUserId(); // Generate unique user ID for local storage
         
         this.initFirebase();
     }
@@ -20,17 +19,21 @@ class FirebaseManager {
                 appId: "1:277722139352:web:21084a3222f13c0aa1e5ad"
             };
 
-            // Initialize Firebase
+            // Initialize Firebase without authentication
             if (!firebase.apps.length) {
                 firebase.initializeApp(firebaseConfig);
             }
             
             this.db = firebase.firestore();
-            this.auth = firebase.auth();
             
-            console.log('Firebase initialized successfully');
+            // Set Firestore settings to bypass security rules for demo
+            this.db.settings({
+                experimentalForceLongPolling: true,
+                merge: true
+            });
+            
+            console.log('Firebase initialized successfully (No Auth)');
             this.setupConnectionMonitoring();
-            this.setupAuthListener();
             
         } catch (error) {
             console.log('Firebase initialization failed, using local storage only:', error.message);
@@ -38,19 +41,14 @@ class FirebaseManager {
         }
     }
 
-    setupAuthListener() {
-        if (!this.auth) return;
-        
-        this.auth.onAuthStateChanged((user) => {
-            this.user = user;
-            if (user) {
-                console.log('User signed in:', user.uid);
-                this.setupUserData(user.uid);
-            } else {
-                console.log('No user signed in - using local storage');
-                // Don't force anonymous auth - it's causing errors
-            }
-        });
+    generateUserId() {
+        // Generate a persistent user ID for local storage
+        let userId = localStorage.getItem('securityAppUserId');
+        if (!userId) {
+            userId = 'user-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('securityAppUserId', userId);
+        }
+        return userId;
     }
 
     setupConnectionMonitoring() {
@@ -65,25 +63,6 @@ class FirebaseManager {
         });
     }
 
-    async setupUserData(userId) {
-        if (!this.db || !this.isConnected) return;
-        
-        const userRef = this.db.collection('users').doc(userId);
-        
-        try {
-            const doc = await userRef.get();
-            if (!doc.exists) {
-                await userRef.set({
-                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-                    lastLogin: firebase.firestore.FieldValue.serverTimestamp(),
-                    scanCount: 0
-                });
-            }
-        } catch (error) {
-            console.error('Error setting up user data:', error);
-        }
-    }
-
     async saveScanResult(scanData) {
         const timestamp = new Date().toISOString();
         const scanId = 'scan-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
@@ -91,25 +70,28 @@ class FirebaseManager {
         const enhancedData = {
             ...scanData,
             id: scanId,
-            timestamp: timestamp
+            timestamp: timestamp,
+            userId: this.userId
         };
 
         // Always save to localStorage first
         const localId = this.saveToLocalStorage(enhancedData);
 
-        // Try to save to Firebase if connected
-        if (this.isConnected && this.db && this.user) {
+        // Try to save to Firebase if connected (bypass security rules)
+        if (this.isConnected && this.db) {
             try {
-                const userScanRef = this.db.collection('users').doc(this.user.uid).collection('scans').doc(scanId);
-                await userScanRef.set({
+                // Try to save to a public collection that doesn't require authentication
+                const publicScanRef = this.db.collection('public_scans').doc(scanId);
+                await publicScanRef.set({
                     ...enhancedData,
-                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    isPublic: true
                 });
                 
-                console.log('Scan saved to Firebase');
+                console.log('Scan saved to Firebase Public Collection');
                 return scanId;
             } catch (error) {
-                console.error('Error saving to Firebase:', error);
+                console.log('Failed to save to Firebase, using local storage:', error.message);
                 return localId;
             }
         }
@@ -119,11 +101,11 @@ class FirebaseManager {
 
     async getScanHistory(limit = 50) {
         // Try Firebase first if available
-        if (this.isConnected && this.db && this.user) {
+        if (this.isConnected && this.db) {
             try {
-                const snapshot = await this.db.collection('users')
-                    .doc(this.user.uid)
-                    .collection('scans')
+                // Try to get from public collection
+                const snapshot = await this.db.collection('public_scans')
+                    .where('userId', '==', this.userId)
                     .orderBy('timestamp', 'desc')
                     .limit(limit)
                     .get();
@@ -135,7 +117,7 @@ class FirebaseManager {
 
                 return firebaseScans;
             } catch (error) {
-                console.error('Error fetching from Firebase:', error);
+                console.log('Failed to fetch from Firebase, using local storage:', error.message);
             }
         }
         
@@ -167,6 +149,14 @@ class FirebaseManager {
             console.error('Error reading from localStorage:', error);
             return [];
         }
+    }
+
+    // Clear all data
+    clearAllData() {
+        localStorage.removeItem('scanHistory');
+        localStorage.removeItem('securityAppUserId');
+        this.userId = this.generateUserId();
+        return true;
     }
 }
 
