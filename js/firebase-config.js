@@ -1,69 +1,73 @@
-// Firebase Configuration
-const firebaseConfig = {
-    apiKey: "AIzaSyBd65HeQ6ZMKyb8DHc05m9Buj9plk4NY04",
-    authDomain: "digital-export-dashboard.firebaseapp.com",
-    projectId: "digital-export-dashboard",
-    storageBucket: "digital-export-dashboard.firebasestorage.app",
-    messagingSenderId: "277722139352",
-    appId: "1:277722139352:web:21084a3222f13c0aa1e5ad"
-};
-
-// Initialize Firebase
-try {
-    firebase.initializeApp(firebaseConfig);
-    console.log('Firebase initialized successfully');
-    
-    // Initialize Firestore and Auth
-    const db = firebase.firestore();
-    const auth = firebase.auth();
-    
-    // Update Firestore rules to allow your security app to work
-    console.log('Firebase services initialized');
-    
-} catch (error) {
-    console.error('Firebase initialization error:', error);
-}
-
-// Firebase Manager with updated security rules
+// Firebase Configuration with Proper Error Handling
 class FirebaseManager {
     constructor() {
-        this.db = firebase.firestore();
-        this.auth = firebase.auth();
         this.isConnected = false;
         this.user = null;
+        this.db = null;
+        this.auth = null;
         
-        this.setupAuthListener();
-        this.setupConnectionMonitoring();
+        this.initFirebase();
+    }
+
+    initFirebase() {
+        try {
+            const firebaseConfig = {
+                apiKey: "AIzaSyBd65HeQ6ZMKyb8DHc05m9Buj9plk4NY04",
+                authDomain: "digital-export-dashboard.firebaseapp.com",
+                projectId: "digital-export-dashboard",
+                storageBucket: "digital-export-dashboard.firebasestorage.app",
+                messagingSenderId: "277722139352",
+                appId: "1:277722139352:web:21084a3222f13c0aa1e5ad"
+            };
+
+            // Initialize Firebase
+            if (!firebase.apps.length) {
+                firebase.initializeApp(firebaseConfig);
+            }
+            
+            this.db = firebase.firestore();
+            this.auth = firebase.auth();
+            
+            console.log('Firebase initialized successfully');
+            this.setupConnectionMonitoring();
+            this.setupAuthListener();
+            
+        } catch (error) {
+            console.log('Firebase initialization failed, using local storage only:', error.message);
+            this.isConnected = false;
+        }
     }
 
     setupAuthListener() {
+        if (!this.auth) return;
+        
         this.auth.onAuthStateChanged((user) => {
             this.user = user;
             if (user) {
-                console.log('User signed in:', user.email);
+                console.log('User signed in:', user.uid);
                 this.setupUserData(user.uid);
             } else {
-                console.log('No user signed in');
-                // Use anonymous auth for basic functionality
-                this.auth.signInAnonymously().catch(error => {
-                    console.log('Anonymous auth not available, using local storage only');
-                });
+                console.log('No user signed in - using local storage');
+                // Don't force anonymous auth - it's causing errors
             }
         });
     }
 
     setupConnectionMonitoring() {
+        if (!this.db) return;
+        
         this.db.enableNetwork().then(() => {
             this.isConnected = true;
-            console.log('Firebase Firestore connected');
+            console.log('Firestore connected');
         }).catch(error => {
+            console.log('Firestore offline, using local storage');
             this.isConnected = false;
-            console.error('Firebase Firestore connection failed, using local storage:', error);
         });
     }
 
     async setupUserData(userId) {
-        // Initialize user document if it doesn't exist
+        if (!this.db || !this.isConnected) return;
+        
         const userRef = this.db.collection('users').doc(userId);
         
         try {
@@ -74,10 +78,6 @@ class FirebaseManager {
                     lastLogin: firebase.firestore.FieldValue.serverTimestamp(),
                     scanCount: 0
                 });
-            } else {
-                await userRef.update({
-                    lastLogin: firebase.firestore.FieldValue.serverTimestamp()
-                });
             }
         } catch (error) {
             console.error('Error setting up user data:', error);
@@ -86,44 +86,40 @@ class FirebaseManager {
 
     async saveScanResult(scanData) {
         const timestamp = new Date().toISOString();
-        const scanId = SecurityUtils.generateReportId();
+        const scanId = 'scan-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
         
         const enhancedData = {
             ...scanData,
             id: scanId,
-            timestamp: timestamp,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            timestamp: timestamp
         };
 
-        // Always save to localStorage as fallback
-        this.saveToLocalStorage('scanHistory', enhancedData, true);
+        // Always save to localStorage first
+        const localId = this.saveToLocalStorage(enhancedData);
 
-        // Try to save to Firebase if connected and user is authenticated
-        if (this.isConnected && this.user) {
+        // Try to save to Firebase if connected
+        if (this.isConnected && this.db && this.user) {
             try {
                 const userScanRef = this.db.collection('users').doc(this.user.uid).collection('scans').doc(scanId);
-                await userScanRef.set(enhancedData);
-                
-                // Update user scan count
-                const userRef = this.db.collection('users').doc(this.user.uid);
-                await userRef.update({
-                    scanCount: firebase.firestore.FieldValue.increment(1),
-                    lastScan: firebase.firestore.FieldValue.serverTimestamp()
+                await userScanRef.set({
+                    ...enhancedData,
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
                 });
                 
+                console.log('Scan saved to Firebase');
                 return scanId;
             } catch (error) {
                 console.error('Error saving to Firebase:', error);
-                return this.saveToLocalStorageOnly(enhancedData);
+                return localId;
             }
-        } else {
-            return this.saveToLocalStorageOnly(enhancedData);
         }
+        
+        return localId;
     }
 
     async getScanHistory(limit = 50) {
-        // First try to get from Firebase
-        if (this.isConnected && this.user) {
+        // Try Firebase first if available
+        if (this.isConnected && this.db && this.user) {
             try {
                 const snapshot = await this.db.collection('users')
                     .doc(this.user.uid)
@@ -137,83 +133,39 @@ class FirebaseManager {
                     ...doc.data()
                 }));
 
-                // Merge with local storage
-                const localScans = this.getFromLocalStorage('scanHistory', limit);
-                const mergedScans = this.mergeScanHistory(firebaseScans, localScans);
-                
-                return mergedScans.slice(0, limit);
+                return firebaseScans;
             } catch (error) {
                 console.error('Error fetching from Firebase:', error);
             }
         }
         
         // Fallback to local storage
-        return this.getFromLocalStorage('scanHistory', limit);
+        return this.getFromLocalStorage(limit);
     }
 
-    mergeScanHistory(firebaseScans, localScans) {
-        const merged = [...firebaseScans];
-        const existingIds = new Set(firebaseScans.map(scan => scan.id));
-        
-        localScans.forEach(scan => {
-            if (!existingIds.has(scan.id)) {
-                merged.push(scan);
-            }
-        });
-        
-        return merged.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    }
-
-    saveToLocalStorage(key, data, isArray = false) {
+    saveToLocalStorage(scanData) {
         try {
-            if (isArray) {
-                const existing = JSON.parse(localStorage.getItem(key)) || [];
-                const updated = [...existing, data].slice(-100); // Keep last 100
-                localStorage.setItem(key, JSON.stringify(updated));
-            } else {
-                localStorage.setItem(key, JSON.stringify(data));
-            }
-            return true;
+            const history = JSON.parse(localStorage.getItem('scanHistory')) || [];
+            history.push(scanData);
+            
+            // Keep only last 100 entries
+            const updatedHistory = history.slice(-100);
+            localStorage.setItem('scanHistory', JSON.stringify(updatedHistory));
+            
+            return scanData.id;
         } catch (error) {
             console.error('Error saving to localStorage:', error);
-            return false;
+            return 'local-' + Date.now();
         }
     }
 
-    saveToLocalStorageOnly(scanData) {
-        const history = JSON.parse(localStorage.getItem('scanHistory')) || [];
-        history.push(scanData);
-        localStorage.setItem('scanHistory', JSON.stringify(history.slice(-100)));
-        return scanData.id;
-    }
-
-    getFromLocalStorage(key, limit = null) {
+    getFromLocalStorage(limit = null) {
         try {
-            const data = JSON.parse(localStorage.getItem(key)) || [];
-            return limit ? data.slice(0, limit) : data;
+            const data = JSON.parse(localStorage.getItem('scanHistory')) || [];
+            return limit ? data.slice(-limit) : data;
         } catch (error) {
             console.error('Error reading from localStorage:', error);
             return [];
-        }
-    }
-
-    // Sync local data to Firebase when connection is restored
-    async syncLocalDataToFirebase() {
-        if (!this.isConnected || !this.user) return;
-        
-        try {
-            const localScans = this.getFromLocalStorage('scanHistory');
-            const batch = this.db.batch();
-            
-            for (const scan of localScans) {
-                const scanRef = this.db.collection('users').doc(this.user.uid).collection('scans').doc(scan.id);
-                batch.set(scanRef, scan);
-            }
-            
-            await batch.commit();
-            console.log('Local data synced to Firebase');
-        } catch (error) {
-            console.error('Error syncing local data to Firebase:', error);
         }
     }
 }
